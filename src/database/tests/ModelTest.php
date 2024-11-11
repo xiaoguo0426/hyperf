@@ -91,15 +91,11 @@ class ModelTest extends TestCase
 
     protected function setUp(): void
     {
-        parent::setUp();
-
         Carbon::setTestNow(Carbon::now());
     }
 
     protected function tearDown(): void
     {
-        parent::tearDown();
-
         Mockery::close();
         Carbon::setTestNow(null);
 
@@ -963,6 +959,65 @@ class ModelTest extends TestCase
         $this->assertArrayHasKey('id', $array);
     }
 
+    public function testMakeVisibleIf()
+    {
+        $model = new ModelStub(['name' => 'foo', 'age' => 'bar', 'id' => 'baz']);
+        $model->setHidden(['age', 'id']);
+        $model->makeVisibleIf(true, 'age');
+        $array = $model->toArray();
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayHasKey('age', $array);
+        $this->assertArrayNotHasKey('id', $array);
+
+        $model->setHidden(['age', 'id']);
+        $model->makeVisibleIf(false, 'age');
+        $array = $model->toArray();
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayNotHasKey('age', $array);
+        $this->assertArrayNotHasKey('id', $array);
+
+        $model->setHidden(['age', 'id']);
+        $model->makeVisibleIf(function ($model) {
+            return ! is_null($model->name);
+        }, 'age');
+        $array = $model->toArray();
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayHasKey('age', $array);
+        $this->assertArrayNotHasKey('id', $array);
+    }
+
+    public function testMakeHiddenIf()
+    {
+        $model = new ModelStub(['name' => 'foo', 'age' => 'bar', 'address' => 'foobar', 'id' => 'baz']);
+        $array = $model->toArray();
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayHasKey('age', $array);
+        $this->assertArrayHasKey('address', $array);
+        $this->assertArrayHasKey('id', $array);
+
+        $array = $model->makeHiddenIf(true, 'address')->toArray();
+        $this->assertArrayNotHasKey('address', $array);
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayHasKey('age', $array);
+        $this->assertArrayHasKey('id', $array);
+
+        $model->makeVisible('address');
+
+        $array = $model->makeHiddenIf(false, ['name', 'age'])->toArray();
+        $this->assertArrayHasKey('name', $array);
+        $this->assertArrayHasKey('age', $array);
+        $this->assertArrayHasKey('address', $array);
+        $this->assertArrayHasKey('id', $array);
+
+        $array = $model->makeHiddenIf(function ($model) {
+            return ! is_null($model->id);
+        }, ['name', 'age'])->toArray();
+        $this->assertArrayHasKey('address', $array);
+        $this->assertArrayNotHasKey('name', $array);
+        $this->assertArrayNotHasKey('age', $array);
+        $this->assertArrayHasKey('id', $array);
+    }
+
     public function testDynamicVisible()
     {
         $model = new ModelDynamicVisibleStub(['name' => 'foo', 'age' => 'bar', 'id' => 'baz']);
@@ -1732,7 +1787,7 @@ class ModelTest extends TestCase
 
     public function testGetOriginalIncrementWithExtra()
     {
-        $model = new class() extends ModelCastingStub {
+        $model = new class extends ModelCastingStub {
             public function newBaseQueryBuilder()
             {
                 $connection = Mockery::mock(Connection::class);
@@ -2014,6 +2069,18 @@ class ModelTest extends TestCase
         $model = new ModelStubWithUuid();
 
         $this->assertTrue(Str::isUuid($model->newUniqueId()));
+    }
+
+    public function testGetMorphAlias()
+    {
+        Relation::morphMap(['user' => ModelStub::class]);
+
+        try {
+            $this->assertSame('user', Relation::getMorphAlias(ModelStub::class));
+            $this->assertSame('Does\Not\Exist', Relation::getMorphAlias('Does\Not\Exist'));
+        } finally {
+            Relation::morphMap([], false);
+        }
     }
 
     protected function getContainer()

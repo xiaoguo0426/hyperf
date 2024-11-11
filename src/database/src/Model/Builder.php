@@ -24,6 +24,9 @@ use Hyperf\Database\Concerns\BuildsQueries;
 use Hyperf\Database\Model\Collection as ModelCollection;
 use Hyperf\Database\Model\Relations\Relation;
 use Hyperf\Database\Query\Builder as QueryBuilder;
+use Hyperf\Database\Query\Expression;
+use Hyperf\Paginator\Contract\CursorPaginator;
+use Hyperf\Paginator\Cursor;
 use Hyperf\Paginator\Paginator;
 use Hyperf\Stringable\Str;
 use Hyperf\Support\Traits\ForwardsCalls;
@@ -36,6 +39,7 @@ use function Hyperf\Collection\collect;
 use function Hyperf\Tappable\tap;
 
 /**
+ * @template TModel of Model
  * @mixin \Hyperf\Database\Query\Builder
  */
 class Builder
@@ -94,7 +98,7 @@ class Builder
     protected $passthru = [
         'insert', 'insertGetId', 'getBindings', 'toSql', 'toRawSql', 'insertOrIgnore',
         'exists', 'doesntExist', 'count', 'min', 'max', 'avg', 'average', 'sum', 'getConnection',
-        'upsert', 'updateOrInsert',
+        'upsert', 'updateOrInsert', 'insertOrIgnoreUsing',
     ];
 
     /**
@@ -484,6 +488,34 @@ class Builder
     }
 
     /**
+     * Find a model by its primary key or call a callback.
+     *
+     * @template TValue
+     *
+     * @param (Closure(): TValue)|list<string>|string $columns
+     * @param null|(Closure(): TValue) $callback
+     * @return (
+     *     $id is (Arrayable<array-key, mixed>|array)
+     *     ? Collection<int, TModel>
+     *     : TModel|TValue
+     * )
+     */
+    public function findOr(mixed $id, array|Closure|string $columns = ['*'], ?Closure $callback = null): mixed
+    {
+        if ($columns instanceof Closure) {
+            $callback = $columns;
+
+            $columns = ['*'];
+        }
+
+        if (! is_null($model = $this->find($id, $columns))) {
+            return $model;
+        }
+
+        return $callback();
+    }
+
+    /**
      * Find a model by its primary key or return fresh model instance.
      *
      * @param array $columns
@@ -588,6 +620,17 @@ class Builder
         if ($result = $this->first([$column])) {
             return $result->{Str::afterLast($column, '.')};
         }
+    }
+
+    /**
+     * Get a single column's value from the first result of the query or throw an exception.
+     * @throws ModelNotFoundException<Model>
+     */
+    public function valueOrFail(Expression|string $column): mixed
+    {
+        $column = $column instanceof Expression ? $column->getValue() : $column;
+
+        return $this->firstOrFail([$column])->{Str::afterLast($column, '.')};
     }
 
     /**
@@ -807,6 +850,16 @@ class Builder
     }
 
     /**
+     * Paginate the given query into a cursor paginator.
+     */
+    public function cursorPaginate(?int $perPage = null, array|string $columns = ['*'], string $cursorName = 'cursor', null|Cursor|string $cursor = null): CursorPaginator
+    {
+        $perPage = $perPage ?: $this->model->getPerPage();
+
+        return $this->paginateUsingCursor($perPage, $columns, $cursorName, $cursor);
+    }
+
+    /**
      * Save a new model and return the instance.
      *
      * @return $this|\Hyperf\Database\Model\Model
@@ -838,6 +891,26 @@ class Builder
     public function update(array $values)
     {
         return $this->toBase()->update($this->addUpdatedAtColumn($values));
+    }
+
+    /**
+     * Update the column's update timestamp.
+     */
+    public function touch(?string $column = null): false|int
+    {
+        $time = $this->model->freshTimestamp();
+
+        if ($column) {
+            return $this->toBase()->update([$column => $time]);
+        }
+
+        $column = $this->model->getUpdatedAtColumn();
+
+        if (! $this->model->usesTimestamps() || is_null($column)) {
+            return false;
+        }
+
+        return $this->toBase()->update([$column => $time]);
     }
 
     /**
@@ -1111,6 +1184,14 @@ class Builder
     }
 
     /**
+     * Qualify the given columns with the model's table.
+     */
+    public function qualifyColumns(array $columns): array
+    {
+        return $this->model->qualifyColumns($columns);
+    }
+
+    /**
      * Get the given macro by name.
      *
      * @param string $name
@@ -1152,6 +1233,55 @@ class Builder
     public static function hasGlobalMacro($name)
     {
         return isset(static::$macros[$name]);
+    }
+
+    /**
+     * Get the default key name of the table.
+     */
+    protected function defaultKeyName(): string
+    {
+        return $this->getModel()->getKeyName();
+    }
+
+    /**
+     * Ensure the proper order by required for cursor pagination.
+     */
+    protected function ensureOrderForCursorPagination(bool $shouldReverse = false): Collection
+    {
+        if (empty($this->query->orders) && empty($this->query->unionOrders)) {
+            $this->enforceOrderBy();
+        }
+
+        $reverseDirection = function ($order) {
+            if (! isset($order['direction'])) {
+                return $order;
+            }
+
+            $order['direction'] = $order['direction'] === 'asc' ? 'desc' : 'asc';
+
+            return $order;
+        };
+
+        if ($shouldReverse) {
+            $this->query->orders = collect($this->query->orders)->map($reverseDirection)->toArray();
+            $this->query->unionOrders = collect($this->query->unionOrders)->map($reverseDirection)->toArray();
+        }
+
+        $orders = ! empty($this->query->unionOrders) ? $this->query->unionOrders : $this->query->orders;
+
+        return collect($orders)
+            ->filter(fn ($order) => Arr::has($order, 'direction'))
+            ->values();
+    }
+
+    /**
+     * Get the Eloquent builder instances that are used in the union of the query.
+     */
+    protected function getUnionBuilders(): Collection
+    {
+        return isset($this->query->unions)
+            ? collect($this->query->unions)->pluck('query')
+            : collect();
     }
 
     /**
